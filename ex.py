@@ -14,9 +14,13 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.0001
-num_epochs = 3
+num_epochs = 10
 batch_size = 32
 iou_threshold = 0.5
+
+#TODO: Replace
+#work_dir = os.path.dirname(__file__)
+work_dir = r'c:\Study\Courses\dl\ex2'
 
 def get_image_pixels(image):
     pixels = torch.from_numpy(np.asarray(image))
@@ -116,7 +120,7 @@ class Net12FCN(nn.Module):
 
 
 def train_net12(net):
-    dataset = load_dataset(r"c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_12.t7", r"c:\Study\Courses\dl\ex2\pascal.t7")
+    dataset = load_dataset(os.path.join(work_dir, r'EX2_data\aflw\aflw_12.t7'), os.path.join(work_dir, 'pascal.t7'))
     random.shuffle(dataset)
     train_size = int(len(dataset) * 0.9)
 
@@ -155,7 +159,7 @@ def train_net12(net):
     mistakes = mistakes.data.view(1)[0]
     print("Error rate: %f" % (float(mistakes / len(test_y))))
 
-    torch.save(net, r'c:\Study\Courses\dl\ex2\net12')
+    torch.save(net, os.path.join(work_dir, 'net12'))
 
 
 class Rectangle(object):
@@ -186,6 +190,38 @@ class RegionProposal(Rectangle):
     def __init__(self, x, y, size, confidence):
         super(RegionProposal, self).__init__(x, y, size, size)
         self.confidence = confidence
+
+
+def nms(regions):
+    if len(regions) == 0:
+        return []
+
+    regions = sorted(regions, key=lambda x: x.confidence, reverse=True)
+
+    x_min = np.array([regions[i].x for i in range(len(regions))], np.float32)
+    y_min = np.array([regions[i].y for i in range(len(regions))], np.float32)
+    x_max = np.array([regions[i].x + regions[i].width for i in range(len(regions))], np.float32)
+    y_max = np.array([regions[i].y + regions[i].height for i in range(len(regions))], np.float32)
+    sizes = (x_max-x_min)* (y_max-y_min)
+
+    ids = np.array(range(len(regions)))
+    res = []
+    while len(ids) > 0:
+        i = ids[0]
+        res.append(regions[i])
+
+        xx1 = np.maximum(x_min[i], x_min[ids[1:]])
+        yy1 = np.maximum(y_min[i], y_min[ids[1:]])
+        xx2 = np.minimum(x_max[i], x_max[ids[1:]])
+        yy2 = np.minimum(y_max[i], y_max[ids[1:]])
+
+        w = np.maximum(xx2 - xx1, 0)
+        h = np.maximum(yy2 - yy1, 0)
+
+        overlap = (w * h) / (sizes[ids[1:]] + sizes[i] - w * h)
+        ids = np.delete(ids, np.concatenate(([0], np.where(((overlap >= 0.5) & (overlap <= 1)))[0] + 1)))
+
+    return res
 
 
 def apply_nms(regions):
@@ -233,30 +269,49 @@ class FaceDetector(object):
             fold_reader.read_fold(ground_truth)
         return ground_truth
 
+    def visualize_ground_truth(self, img_dir):
+        keys = list(self._ground_truth.keys())
+        ind = randint(0, len(keys))
+        key = keys[ind]
+
+        img = Image.open(os.path.join(img_dir, key))
+        fig, ax = plt.subplots(1)
+
+        ax.imshow(img)
+        for r in self._ground_truth[key]:
+            ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
+        plt.show()
+
     def calculate_recall(self, img_dir):
         mistakes = 0
-        total_truths = 0
-        total_proposals = 0
-        total_imgs = 0
+        num_truths = 0
+        num_errors = 0
+
         for k in self._ground_truth:
-            img_path = os.path.join(img_dir, k)
             try:
-                m, l = self.detect_image(img_path, debug=False)
-                mistakes += m
-                total_proposals += l
-                total_imgs += 1
-                total_truths += len(self._ground_truth[k])
+                regions = self.detect_image(os.path.join(img_dir, k), debug=False)
             except:
-                # FIX THIS FOR GREYSCALE SOMEHOW!
-                pass
-        #total_imgs = sum([len(self._ground_truth[k]) for k in self._ground_truth])
-        return float(mistakes) / total_truths, float(total_proposals) / total_truths, float(total_proposals) / total_imgs
+                num_errors += 1
+                continue
+            truths = self._ground_truth[k]
+            for truth in truths:
+                num_truths += 1
+                agreeing_regions = [r for r in regions if truth.iou(r) >= iou_threshold]
+                if len(agreeing_regions) == 0:
+                    mistakes += 1
+
+        print("Mistakes: %d" % mistakes)
+        print("Num of truths: %d" % num_truths)
+        print("Num of images: %d" % len(self._ground_truth))
+        print("Recall: %f" % (mistakes / num_truths))
+        print("Num of errors: %d" % num_errors)
+
 
     def detect_image(self, image_path, debug=True):
         img = Image.open(image_path)
 
         res = []
-        for scale in [50, 300, 200]:
+        for scale in [100, 150, 200, 250, 300]:
             rescaled_img = img.resize((int(img.size[0] * 12.0 / scale), int(img.size[1] * 12.0 / scale)))
             pixels = get_image_pixels(rescaled_img)
             predict = self._net(Variable(pixels.unsqueeze(0)))
@@ -270,19 +325,19 @@ class FaceDetector(object):
                         regions.append(RegionProposal(int(j * scale / 12.0), 2 * int(i * scale / 12.0),
                                                       scale, max_val[0]))
 
-            apply_nms(regions)
+            regions = nms(regions)
             res += regions
 
-        # Find the corresponding ground truth
-        for k in self._ground_truth:
-            if image_path.endswith(k):
-                truth = self._ground_truth[k]
-                mistakes = 0
-                for rect in truth:
-                    if len([x for x in res if x.iou(rect) >= iou_threshold]) == 0:
-                        mistakes += 1
-
         if debug:
+            # Find the corresponding ground truth
+            for k in self._ground_truth:
+                if image_path.endswith(k):
+                    truth = self._ground_truth[k]
+                    mistakes = 0
+                    for rect in truth:
+                        if len([x for x in res if x.iou(rect) >= iou_threshold]) == 0:
+                            mistakes += 1
+
             fig, ax = plt.subplots(1)
             ax.imshow(img)
             for r in res:
@@ -290,4 +345,4 @@ class FaceDetector(object):
             plt.show()
             print("Mistakes: %d" % mistakes)
         else:
-            return mistakes, len(res)
+            return res

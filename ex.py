@@ -10,6 +10,7 @@ from PIL import Image
 from random import randint
 from glob import glob
 from matplotlib import pyplot as plt
+from skimage.transform import pyramid_gaussian
 import matplotlib.patches as patches
 import os
 
@@ -17,6 +18,9 @@ learn_rate = 0.0001
 num_epochs = 10
 batch_size = 32
 iou_threshold = 0.5
+pyramid_downscale = 1.16
+pyramid_len = 15
+min_face_size = 54
 
 #TODO: Replace
 #work_dir = os.path.dirname(__file__)
@@ -25,8 +29,8 @@ work_dir = r'c:\Study\Courses\dl\ex2'
 def get_image_pixels(image):
     pixels = torch.from_numpy(np.asarray(image))
 
-    # Reorder from W H C to C H W
-    pixels = pixels.permute(2, 0, 1)
+    # Reorder from H W C to C W H
+    pixels = pixels.permute(2, 1, 0)
     # Convert to Float to save up space
     return pixels.float() / 255
 
@@ -45,7 +49,7 @@ def get_image_random_region(image_path, crop_size, scale_size):
 
 
 def show_tensor_as_image(pixels):
-    plt.imshow((pixels.permute(1, 2, 0) * 255).byte().numpy())
+    plt.imshow((pixels.permute(2, 1, 0) * 255).byte().numpy())
     plt.show()
 
 
@@ -202,7 +206,7 @@ def nms(regions):
     y_min = np.array([regions[i].y for i in range(len(regions))], np.float32)
     x_max = np.array([regions[i].x + regions[i].width for i in range(len(regions))], np.float32)
     y_max = np.array([regions[i].y + regions[i].height for i in range(len(regions))], np.float32)
-    sizes = (x_max-x_min)* (y_max-y_min)
+    sizes = (x_max-x_min) * (y_max-y_min)
 
     ids = np.array(range(len(regions)))
     res = []
@@ -210,31 +214,19 @@ def nms(regions):
         i = ids[0]
         res.append(regions[i])
 
-        xx1 = np.maximum(x_min[i], x_min[ids[1:]])
-        yy1 = np.maximum(y_min[i], y_min[ids[1:]])
-        xx2 = np.minimum(x_max[i], x_max[ids[1:]])
-        yy2 = np.minimum(y_max[i], y_max[ids[1:]])
+        rightmost_min_x = np.maximum(x_min[i], x_min[ids[1:]])
+        lowest_min_y = np.maximum(y_min[i], y_min[ids[1:]])
+        leftmost_max_x = np.minimum(x_max[i], x_max[ids[1:]])
+        highest_max_y = np.minimum(y_max[i], y_max[ids[1:]])
 
-        w = np.maximum(xx2 - xx1, 0)
-        h = np.maximum(yy2 - yy1, 0)
+        w = np.maximum(leftmost_max_x - rightmost_min_x, 0)
+        h = np.maximum(highest_max_y - lowest_min_y, 0)
 
         overlap = (w * h) / (sizes[ids[1:]] + sizes[i] - w * h)
         ids = np.delete(ids, np.concatenate(([0], np.where(((overlap >= 0.5) & (overlap <= 1)))[0] + 1)))
 
     return res
 
-
-def apply_nms(regions):
-    regions = sorted(regions, key=lambda x: x.confidence, reverse=True)
-    res_regions = regions[:]
-    import pdb
-    pdb.set_trace()
-    for r in regions:
-        if r in res_regions:
-            for r2 in regions:
-                if r != r2 and r2 in res_regions and r.iou(r2) >= iou_threshold:
-                    res_regions.remove(r2)
-    return res_regions
 
 class EllipseFoldReader(object):
     def __init__(self, path):
@@ -256,6 +248,22 @@ class EllipseFoldReader(object):
 
     def _translate_ellipse_path(self, ellipse_path):
         return ellipse_path.replace('/', os.sep) + '.jpg'
+
+class ImagePyramid(object):
+    def __init__(self, img, num_images, downscale):
+        self._imgs = [img]
+        for i in range(num_images - 1):
+            size = [int(x / downscale) for x in img.size]
+            if 0 in size:
+                break
+            img = img.resize(tuple(size))
+            self._imgs.append(img)
+
+    def __len__(self):
+        return len(self._imgs)
+
+    def __getitem__(self, i):
+        return self._imgs[i]
 
 class FaceDetector(object):
     def __init__(self, net, ground_truth_path):
@@ -286,10 +294,12 @@ class FaceDetector(object):
         mistakes = 0
         num_truths = 0
         num_errors = 0
+        num_regions = 0
 
         for k in self._ground_truth:
             try:
                 regions = self.detect_image(os.path.join(img_dir, k), debug=False)
+                num_regions += len(regions)
             except:
                 num_errors += 1
                 continue
@@ -303,17 +313,23 @@ class FaceDetector(object):
         print("Mistakes: %d" % mistakes)
         print("Num of truths: %d" % num_truths)
         print("Num of images: %d" % len(self._ground_truth))
+        print("Num of region proposals: %d" % num_regions)
         print("Recall: %f" % (mistakes / num_truths))
         print("Num of errors: %d" % num_errors)
 
 
     def detect_image(self, image_path, debug=True):
-        img = Image.open(image_path)
+        image = Image.open(image_path)
 
         res = []
-        for scale in [100, 150, 200, 250, 300]:
-            rescaled_img = img.resize((int(img.size[0] * 12.0 / scale), int(img.size[1] * 12.0 / scale)))
-            pixels = get_image_pixels(rescaled_img)
+        pyramid = ImagePyramid(image, pyramid_len, pyramid_downscale)
+        scale_resize_factor = 1.0
+        for img in pyramid:
+            resized_img = img.resize((int(x * 12.0 / min_face_size) for x in img.size))
+            if min(resized_img.size) < 12:
+                break
+
+            pixels = get_image_pixels(resized_img)
             predict = self._net(Variable(pixels.unsqueeze(0)))
             predict = predict[0].data
 
@@ -322,27 +338,18 @@ class FaceDetector(object):
                 for j in range(predict.size()[2]):
                     max_val, max_index = predict[:, i, j].max(0)
                     if max_index[0] == 1:
-                        regions.append(RegionProposal(int(j * scale / 12.0), 2 * int(i * scale / 12.0),
-                                                      scale, max_val[0]))
-
+                        regions.append(RegionProposal(scale_resize_factor * 2 * i * min_face_size / 12.0,
+                                                      scale_resize_factor * 2 * j * min_face_size / 12.0,
+                                                      scale_resize_factor * min_face_size, max_val[0]))
             regions = nms(regions)
             res += regions
+            scale_resize_factor *= pyramid_downscale
 
         if debug:
-            # Find the corresponding ground truth
-            for k in self._ground_truth:
-                if image_path.endswith(k):
-                    truth = self._ground_truth[k]
-                    mistakes = 0
-                    for rect in truth:
-                        if len([x for x in res if x.iou(rect) >= iou_threshold]) == 0:
-                            mistakes += 1
-
             fig, ax = plt.subplots(1)
-            ax.imshow(img)
+            ax.imshow(image)
             for r in res:
-                ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
+                ax.add_patch(
+                    patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
             plt.show()
-            print("Mistakes: %d" % mistakes)
-        else:
-            return res
+        return res

@@ -229,15 +229,16 @@ def nms(regions):
 
 
 class EllipseFoldReader(object):
-    def __init__(self, path):
+    def __init__(self, path, img_dir):
         self._data = open(path, "r").read().splitlines()
+        self._img_dir = img_dir
         self._index = 0
 
     def is_end(self):
         return self._index >= len(self._data)
 
     def read_fold(self, folds_dict):
-        path = self._translate_ellipse_path(str(self._data[self._index]))
+        path = self._translate_ellipse_path(str(self._data[self._index]), self._img_dir)
         num_regions = int(self._data[self._index + 1])
         rectangles = []
         for i in range(num_regions):
@@ -246,8 +247,8 @@ class EllipseFoldReader(object):
         folds_dict[path] = rectangles
         self._index += 2 + num_regions
 
-    def _translate_ellipse_path(self, ellipse_path):
-        return ellipse_path.replace('/', os.sep) + '.jpg'
+    def _translate_ellipse_path(self, ellipse_path, img_dir):
+        return os.path.join(img_dir, ellipse_path.replace('/', os.sep)) + '.jpg'
 
 class ImagePyramid(object):
     def __init__(self, img, num_images, downscale):
@@ -266,23 +267,23 @@ class ImagePyramid(object):
         return self._imgs[i]
 
 class FaceDetector(object):
-    def __init__(self, net, ground_truth_path):
+    def __init__(self, net, ground_truth_path, img_dir):
         self._net = net
-        self._ground_truth = self.read_ground_truth(ground_truth_path)
+        self._ground_truth = self.read_ground_truth(ground_truth_path, img_dir)
 
-    def read_ground_truth(self, ground_truth_path):
-        fold_reader = EllipseFoldReader(ground_truth_path)
+    def read_ground_truth(self, ground_truth_path, img_dir):
+        fold_reader = EllipseFoldReader(ground_truth_path, img_dir)
         ground_truth = {}
         while not fold_reader.is_end():
             fold_reader.read_fold(ground_truth)
         return ground_truth
 
-    def visualize_ground_truth(self, img_dir):
+    def visualize_ground_truth(self):
         keys = list(self._ground_truth.keys())
         ind = randint(0, len(keys))
         key = keys[ind]
 
-        img = Image.open(os.path.join(img_dir, key))
+        img = Image.open(key)
         fig, ax = plt.subplots(1)
 
         ax.imshow(img)
@@ -290,23 +291,18 @@ class FaceDetector(object):
             ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
         plt.show()
 
-    def calculate_recall(self, img_dir):
+    def calculate_recall(self):
         mistakes = 0
         num_truths = 0
-        num_errors = 0
         num_regions = 0
 
-        for k in self._ground_truth:
-            try:
-                regions = self.detect_image(os.path.join(img_dir, k), debug=False)
-                num_regions += len(regions)
-            except:
-                num_errors += 1
-                continue
+        res = self.detect_all_images()
+
+        for k in res:
             truths = self._ground_truth[k]
             for truth in truths:
                 num_truths += 1
-                agreeing_regions = [r for r in regions if truth.iou(r) >= iou_threshold]
+                agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
                 if len(agreeing_regions) == 0:
                     mistakes += 1
 
@@ -314,8 +310,7 @@ class FaceDetector(object):
         print("Num of truths: %d" % num_truths)
         print("Num of images: %d" % len(self._ground_truth))
         print("Num of region proposals: %d" % num_regions)
-        print("Recall: %f" % (mistakes / num_truths))
-        print("Num of errors: %d" % num_errors)
+        print("Recall: %f" % ((num_truths - mistakes) / num_truths))
 
 
     def detect_image(self, image_path, debug=True):
@@ -352,4 +347,16 @@ class FaceDetector(object):
                 ax.add_patch(
                     patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
             plt.show()
+        return res
+
+    def detect_all_images(self):
+        res = {}
+        for k in self._ground_truth:
+            try:
+                regions = self.detect_image(k, debug=False)
+                res[k] = regions
+            except:
+                # TODO: Ask if this is ok
+                continue
+
         return res

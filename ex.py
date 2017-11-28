@@ -14,12 +14,12 @@ from skimage.transform import pyramid_gaussian
 import matplotlib.patches as patches
 import os
 
-learn_rate = 0.0001
+learn_rate = 0.001
 num_epochs = 10
 batch_size = 32
 iou_threshold = 0.5
-pyramid_downscale = 1.14
-pyramid_len = 15
+pyramid_downscale = 1.06
+pyramid_len = 50
 min_face_size = 40
 
 #TODO: Replace
@@ -138,10 +138,7 @@ class Net12FCN(nn.Module):
         x = self.conv3(x)
         return self.softmax(x)
 
-# 3x24x24
-# 64x20x20
-# 64x9x9
-# 128x1x1
+
 class Net24(nn.Module):
     def __init__(self):
         super(Net24, self).__init__()
@@ -167,9 +164,9 @@ class Net24(nn.Module):
 
 def train_net24_temp():
     net = Net24()
-    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine.t7')
+    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine_all.t7')
     random.shuffle(dataset)
-    #dataset = dataset[:int(0.1 * len(dataset))]
+    dataset = dataset[:int(0.1 * len(dataset))]
     train_size = int(len(dataset) * 0.9)
 
     train_dataset = FaceDataset(dataset[:train_size])
@@ -181,7 +178,7 @@ def train_net24_temp():
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
-    for epoch in range(num_epochs):
+    for epoch in range(3):
         print("Epoch %d" % epoch)
         losses = []
         for i_batch, batch in enumerate(train_loader):
@@ -382,7 +379,7 @@ class FaceDetector(object):
             ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
         plt.show()
 
-    def calculate_recall(self, full_stack):
+    def calculate_recall(self, full_stack, debug=True):
         mistakes = 0
         num_truths = 0
         num_regions = 0
@@ -398,11 +395,15 @@ class FaceDetector(object):
                 if len(agreeing_regions) == 0:
                     mistakes += 1
 
-        print("Mistakes: %d" % mistakes)
-        print("Num of truths: %d" % num_truths)
-        print("Num of images: %d" % len(self._ground_truth))
-        print("Num of region proposals: %d" % num_regions)
-        print("Recall: %f" % ((num_truths - mistakes) / num_truths))
+        if debug:
+            print("Mistakes: %d" % mistakes)
+            print("Num of truths: %d" % num_truths)
+            print("Num of images: %d" % len(self._ground_truth))
+            print("Num of region proposals: %d" % num_regions)
+            print("Recall: %f" % ((num_truths - mistakes) / num_truths))
+        else:
+            return (num_truths - mistakes) / num_truths
+
 
     def detect_image_12(self, image_path, debug=True):
         image = Image.open(image_path)
@@ -420,13 +421,13 @@ class FaceDetector(object):
             predict = predict[0].data
 
             regions = []
-            for i in range(predict.size()[1]):
-                for j in range(predict.size()[2]):
-                    max_val, max_index = predict[:, i, j].max(0)
-                    if max_index[0] == 1:
-                        regions.append(RegionProposal(scale_resize_factor * 2 * j * min_face_size / 12.0,
-                                                      scale_resize_factor * 2 * i * min_face_size / 12.0,
-                                                      scale_resize_factor * min_face_size, max_val[0]))
+            approved_idxs = torch.nonzero(predict.max(0)[1][0])
+            if len(approved_idxs):
+                for idxs in approved_idxs:
+                    regions.append(RegionProposal(scale_resize_factor * 2 * idxs[1] * min_face_size / 12.0,
+                                                  scale_resize_factor * 2 * idxs[0] * min_face_size / 12.0,
+                                                  scale_resize_factor * min_face_size,
+                                                  predict[0][idxs[0]][idxs[1]]))
             regions = nms(regions)
             res += regions
             scale_resize_factor *= pyramid_downscale
@@ -443,6 +444,7 @@ class FaceDetector(object):
     def detect_all_images(self, full_stack):
         res = {}
         num_images = 0
+        num_errors = 0
         for k in self._ground_truth:
             try:
                 print('\rRunning detector on images... (%d)' % num_images, end="")
@@ -454,9 +456,11 @@ class FaceDetector(object):
                 num_images += 1
             except:
                 # TODO: Ask if this is ok
+                num_errors += 1
                 continue
 
         print('')
+        print('Num of errors: %d' % num_errors)
         return res
 
     def detect_image(self, image_path, debug=True):
@@ -476,7 +480,7 @@ class FaceDetector(object):
         labels = labels.view(-1)
 
         final_regions = [RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i][1]) for i in torch.nonzero(labels).view(-1)]
-        final_regions = nms(final_regions)
+        #final_regions = nms(final_regions)
 
         if debug:
             fig, ax = plt.subplots(1)
@@ -501,10 +505,33 @@ class FaceDetector(object):
                     pixels = get_image_pixels(resized_crop)
                     predict = self._net24(Variable(pixels.unsqueeze(0)))
                     predict = predict.data
-                    if predict[0][0] < -10:
+                    if predict[0][0] > predict[0][1]:
                         mistakes += 1
                 except:
                     errors += 1
                     continue
         print("Mistakes: %d" % mistakes)
         print("Errors: %d" % errors)
+
+def test_temp():
+    net12 = torch.load(r'c:\Study\Courses\dl\ex2\net12')
+    net24 = torch.load(r'c:\Study\Courses\dl\ex2\net24')
+    f = FaceDetector(net12, net24, r'c:\Study\Courses\dl\ex2\EX2_data\fddb\FDDB-folds\FDDB-fold-01-ellipseList.txt',
+                     r'c:\Study\Courses\dl\ex2\EX2_data\fddb\images')
+
+    min_config = ()
+    min_recall = 1
+    for pyramid_downscale in [1.06, 1.07, 1.08, 1.09, 1.1, 1.11]:
+        for min_face_size in range(25, 35, 1):
+            recall = f.calculate_recall(full_stack=False, debug=False)
+            if recall < min_recall:
+                min_recall = recall
+                min_config = (pyramid_downscale, min_face_size)
+
+    print("BEST: %f %f %f" % (min_recall, min_config[0], min_config[1]))
+    mine_negative_dataset(f, r'c:\Study\Courses\dl\ex2\negative_mine.t7', 30000)
+    train_net24_temp()
+    net24 = torch.load(r'c:\Study\Courses\dl\ex2\net24')
+    f = FaceDetector(net12, net24, r'c:\Study\Courses\dl\ex2\EX2_data\fddb\FDDB-folds\FDDB-fold-01-ellipseList.txt',
+                     r'c:\Study\Courses\dl\ex2\EX2_data\fddb\images')
+    f.calculate_recall(full_stack=True)

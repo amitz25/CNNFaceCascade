@@ -15,12 +15,12 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.0001
-num_epochs = 4
+num_epochs = 10
 batch_size = 32
 iou_threshold = 0.5
-pyramid_downscale = 1.16
+pyramid_downscale = 1.14
 pyramid_len = 15
-min_face_size = 54
+min_face_size = 40
 
 #TODO: Replace
 #work_dir = os.path.dirname(__file__)
@@ -30,8 +30,9 @@ def get_image_pixels(image):
     pixels = torch.from_numpy(np.asarray(image))
 
     # Reorder from H W C to C W H
-    pixels = pixels.permute(2, 1, 0)
-    # Convert to Float to save up space
+    pixels = pixels.permute(2, 0, 1)
+
+    # Convert to float to maintain consistency
     return pixels.float() / 255
 
 
@@ -44,12 +45,11 @@ def get_image_random_region(image_path, crop_size):
     y = randint(0, max_y)
 
     img = img.crop((x, y, x + crop_size, y + crop_size))
-    #img = img.resize((scale_size, scale_size))
     return get_image_pixels(img)
 
 
 def show_tensor_as_image(pixels):
-    plt.imshow((pixels.permute(2, 1, 0) * 255).byte().numpy())
+    plt.imshow((pixels.permute(1, 2, 0) * 255).byte().numpy())
     plt.show()
 
 
@@ -66,8 +66,6 @@ def generate_pascal_dataset(image_dir, crop_size, num_samples, output_path):
             # Convert to long to save space
             samples.append((sample * 255).long())
 
-    # Convert to long to save space
-    samples = [(x * 255).long() for x in samples]
     torch.save(samples, output_path)
 
 def mine_negative_dataset(face_detector, output_path, sample_size=3000):
@@ -187,6 +185,8 @@ def train_net24_temp():
         print("Epoch %d" % epoch)
         losses = []
         for i_batch, batch in enumerate(train_loader):
+            import pdb
+            pdb.set_trace()
             x = Variable(batch['data'])
             y = Variable(batch['label'])
             optimizer.zero_grad()
@@ -391,7 +391,7 @@ class FaceDetector(object):
 
         for k in res:
             truths = self._ground_truth[k]
-            num_regions += len(res)
+            num_regions += len(res[k])
             for truth in truths:
                 num_truths += 1
                 agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
@@ -424,8 +424,8 @@ class FaceDetector(object):
                 for j in range(predict.size()[2]):
                     max_val, max_index = predict[:, i, j].max(0)
                     if max_index[0] == 1:
-                        regions.append(RegionProposal(scale_resize_factor * 2 * i * min_face_size / 12.0,
-                                                      scale_resize_factor * 2 * j * min_face_size / 12.0,
+                        regions.append(RegionProposal(scale_resize_factor * 2 * j * min_face_size / 12.0,
+                                                      scale_resize_factor * 2 * i * min_face_size / 12.0,
                                                       scale_resize_factor * min_face_size, max_val[0]))
             regions = nms(regions)
             res += regions
@@ -474,7 +474,9 @@ class FaceDetector(object):
         predict = predict.data
         labels = predict.max(1)[1]
         labels = labels.view(-1)
-        final_regions = [regions[i] for i in torch.nonzero(labels).view(-1)]
+
+        final_regions = [RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i][1]) for i in torch.nonzero(labels).view(-1)]
+        final_regions = nms(final_regions)
 
         if debug:
             fig, ax = plt.subplots(1)
@@ -499,10 +501,7 @@ class FaceDetector(object):
                     pixels = get_image_pixels(resized_crop)
                     predict = self._net24(Variable(pixels.unsqueeze(0)))
                     predict = predict.data
-                    import pdb
-                    pdb.set_trace()
-                    label = predict.view(-1).max(0)[1].view(-1)[0]
-                    if label != 1:
+                    if predict[0][0] < -10:
                         mistakes += 1
                 except:
                     errors += 1

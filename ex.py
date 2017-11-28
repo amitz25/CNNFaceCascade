@@ -15,7 +15,7 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.0001
-num_epochs = 10
+num_epochs = 4
 batch_size = 32
 iou_threshold = 0.5
 pyramid_downscale = 1.16
@@ -35,7 +35,7 @@ def get_image_pixels(image):
     return pixels.float() / 255
 
 
-def get_image_random_region(image_path, crop_size, scale_size):
+def get_image_random_region(image_path, crop_size):
     img = Image.open(image_path)
     max_x = img.size[0] - crop_size - 1
     max_y = img.size[1] - crop_size - 1
@@ -53,15 +53,15 @@ def show_tensor_as_image(pixels):
     plt.show()
 
 
-def generate_pascal_dataset(image_dir, crop_size, sample_size, num_samples, output_path):
+def generate_pascal_dataset(image_dir, crop_size, num_samples, output_path):
     image_list = glob(os.path.join(image_dir, "*"))
     samples = []
     while len(samples) < num_samples:
         for image_path in image_list:
-            print('\rGenerating images (%d\\%d)' % (len(samples), num_samples), end="")
+            print('\rGenerating images... (%d\\%d)' % (len(samples), num_samples), end="")
             if len(samples) >= num_samples:
                 break
-            sample = get_image_random_region(image_path, crop_size, sample_size)
+            sample = get_image_random_region(image_path, crop_size)
 
             # Convert to long to save space
             samples.append((sample * 255).long())
@@ -70,17 +70,35 @@ def generate_pascal_dataset(image_dir, crop_size, sample_size, num_samples, outp
     samples = [(x * 255).long() for x in samples]
     torch.save(samples, output_path)
 
+def mine_negative_dataset(face_detector, output_path, sample_size=3000):
+    regions_by_img = face_detector.detect_all_images(full_stack=False)
 
-def load_dataset(aflw_path, pascal_path):
-    aflw_dataset = load_lua(aflw_path)
-    pascal_dataset = torch.load(pascal_path)
-    pascal_dataset = [x.float() / 255 for x in pascal_dataset]
-    dataset = [(aflw_dataset[k], 1) for k in aflw_dataset]
-    dataset += [(k, 0) for k in pascal_dataset]
+    samples = []
+    for img_path in regions_by_img:
+        if len(samples) >= sample_size:
+            break
+
+        img = Image.open(img_path)
+        for region in regions_by_img[img_path]:
+            crop = img.crop((region.x, region.y, region.x + region.width, region.y + region.height))
+            resized_crop = crop.resize((24, 24))
+            # Convert to long to save space
+            pixels = (get_image_pixels(resized_crop) * 255).long()
+            samples.append(pixels)
+            print('\rGenerating images (%d)' % len(samples), end="")
+    torch.save(samples, output_path)
+
+
+def load_dataset(positive_path, negative_path):
+    positive_dataset = load_lua(positive_path)
+    negative_dataset = torch.load(negative_path)
+    negative_dataset = [x.float() / 255 for x in negative_dataset]
+    dataset = [(positive_dataset[k], 1) for k in positive_dataset]
+    dataset += [(k, 0) for k in negative_dataset]
     return dataset
 
 
-class Dataset12(Dataset):
+class FaceDataset(Dataset):
     def __init__(self, dataset):
         self._dataset = dataset
 
@@ -122,13 +140,41 @@ class Net12FCN(nn.Module):
         x = self.conv3(x)
         return self.softmax(x)
 
+# 3x24x24
+# 64x20x20
+# 64x9x9
+# 128x1x1
+class Net24(nn.Module):
+    def __init__(self):
+        super(Net24, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=5, stride=1)
+        self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
+        self.linear1 = nn.Linear(in_features=5184, out_features=128)
+        self.linear2 = nn.Linear(in_features=128, out_features=2)
+        self.softmax = nn.LogSoftmax()
 
-def train_net12(net):
-    dataset = load_dataset(os.path.join(work_dir, r'EX2_data\aflw\aflw_12.t7'), os.path.join(work_dir, 'pascal.t7'))
+    def forward(self, x):
+        x = F.relu(self.pool(self.conv1(x)))
+        x = x.view(x.size()[0], -1)
+        x = F.relu(self.linear1(x))
+        x = self.linear2(x)
+        return self.softmax(x)
+
+    def load_dataset(self, aflw_path, mine_path):
+        aflw_dataset = load_lua(aflw_path)
+        mine_dataset = torch.load(mine_path)
+        dataset = [(aflw_dataset[k], 1) for k in aflw_dataset]
+        dataset += [(k, 0) for k in mine_dataset]
+        return dataset
+
+def train_net24_temp():
+    net = Net24()
+    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine.t7')
     random.shuffle(dataset)
+    #dataset = dataset[:int(0.1 * len(dataset))]
     train_size = int(len(dataset) * 0.9)
 
-    train_dataset = Dataset12(dataset[:train_size])
+    train_dataset = FaceDataset(dataset[:train_size])
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     test_dataset = dataset[train_size:]
@@ -157,13 +203,53 @@ def train_net12(net):
         avg_train_loss = float(sum(losses)) / len(losses)
         print("Train loss %f, validation loss %f" % (avg_train_loss, test_loss.data[0]))
 
-    net.eval()
     predict = net(test_x).max(1)[1]
     mistakes = sum(predict != test_y)
     mistakes = mistakes.data.view(1)[0]
     print("Error rate: %f" % (float(mistakes / len(test_y))))
 
-    torch.save(net, os.path.join(work_dir, 'net12'))
+    torch.save(net, r'c:\Study\Courses\dl\ex2\net24')
+
+def train_net(net, positive_dataset_path, negative_dataset_path, output_path):
+    dataset = load_dataset(positive_dataset_path, negative_dataset_path)
+    random.shuffle(dataset)
+    train_size = int(len(dataset) * 0.9)
+
+    train_dataset = FaceDataset(dataset[:train_size])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    test_dataset = dataset[train_size:]
+    test_x = Variable(torch.stack([x[0] for x in test_dataset]))
+    test_y = Variable(torch.LongTensor([x[1] for x in test_dataset]))
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
+    for epoch in range(num_epochs):
+        print("Epoch %d" % epoch)
+        losses = []
+        for i_batch, batch in enumerate(train_loader):
+            x = Variable(batch['data'])
+            y = Variable(batch['label'])
+            optimizer.zero_grad()
+            output = net(x)
+            output = output.view(output.size()[0], output.size()[1])
+            loss = criterion(output, y)
+            losses.append(loss.data[0])
+            loss.backward()
+            optimizer.step()
+
+        test_predict = net(test_x)
+        test_predict = test_predict.view(test_predict.size()[0], test_predict.size()[1])
+        test_loss = criterion(test_predict, test_y)
+        avg_train_loss = float(sum(losses)) / len(losses)
+        print("Train loss %f, validation loss %f" % (avg_train_loss, test_loss.data[0]))
+
+    predict = net(test_x).max(1)[1]
+    mistakes = sum(predict != test_y)
+    mistakes = mistakes.data.view(1)[0]
+    print("Error rate: %f" % (float(mistakes / len(test_y))))
+
+    torch.save(net, output_path)
 
 
 class Rectangle(object):
@@ -266,10 +352,15 @@ class ImagePyramid(object):
     def __getitem__(self, i):
         return self._imgs[i]
 
+
 class FaceDetector(object):
-    def __init__(self, net, ground_truth_path, img_dir):
-        self._net = net
+    def __init__(self, net12, net24, ground_truth_path, img_dir):
+        self._net12 = net12
+        self._net24 = net24
         self._ground_truth = self.read_ground_truth(ground_truth_path, img_dir)
+
+    def get_ground_truth(self):
+        return self._ground_truth
 
     def read_ground_truth(self, ground_truth_path, img_dir):
         fold_reader = EllipseFoldReader(ground_truth_path, img_dir)
@@ -291,15 +382,16 @@ class FaceDetector(object):
             ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
         plt.show()
 
-    def calculate_recall(self):
+    def calculate_recall(self, full_stack):
         mistakes = 0
         num_truths = 0
         num_regions = 0
 
-        res = self.detect_all_images()
+        res = self.detect_all_images(full_stack)
 
         for k in res:
             truths = self._ground_truth[k]
+            num_regions += len(res)
             for truth in truths:
                 num_truths += 1
                 agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
@@ -312,8 +404,7 @@ class FaceDetector(object):
         print("Num of region proposals: %d" % num_regions)
         print("Recall: %f" % ((num_truths - mistakes) / num_truths))
 
-
-    def detect_image(self, image_path, debug=True):
+    def detect_image_12(self, image_path, debug=True):
         image = Image.open(image_path)
 
         res = []
@@ -325,7 +416,7 @@ class FaceDetector(object):
                 break
 
             pixels = get_image_pixels(resized_img)
-            predict = self._net(Variable(pixels.unsqueeze(0)))
+            predict = self._net12(Variable(pixels.unsqueeze(0)))
             predict = predict[0].data
 
             regions = []
@@ -349,14 +440,72 @@ class FaceDetector(object):
             plt.show()
         return res
 
-    def detect_all_images(self):
+    def detect_all_images(self, full_stack):
         res = {}
+        num_images = 0
         for k in self._ground_truth:
             try:
-                regions = self.detect_image(k, debug=False)
+                print('\rRunning detector on images... (%d)' % num_images, end="")
+                if full_stack:
+                    regions = self.detect_image(k, debug=False)
+                else:
+                    regions = self.detect_image_12(k, debug=False)
                 res[k] = regions
+                num_images += 1
             except:
                 # TODO: Ask if this is ok
                 continue
 
+        print('')
         return res
+
+    def detect_image(self, image_path, debug=True):
+        img = Image.open(image_path)
+
+        regions = self.detect_image_12(image_path, debug)
+        pixel_regions = []
+        for r in regions:
+            crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
+            resized_crop = crop.resize((24, 24))
+            pixels = get_image_pixels(resized_crop)
+            pixel_regions.append(pixels)
+
+        predict = self._net24(Variable(torch.stack(pixel_regions)))
+        predict = predict.data
+        labels = predict.max(1)[1]
+        labels = labels.view(-1)
+        final_regions = [regions[i] for i in torch.nonzero(labels).view(-1)]
+
+        if debug:
+            fig, ax = plt.subplots(1)
+            ax.imshow(img)
+            for r in final_regions:
+                ax.add_patch(
+                    patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
+            plt.show()
+        else:
+            return final_regions
+
+    #TODO: Delete
+    def calc_ground_truth_recall_24net(self):
+        mistakes = 0
+        errors = 0
+        for k in self._ground_truth:
+            for r in self._ground_truth[k]:
+                try:
+                    img = Image.open(k)
+                    crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
+                    resized_crop = crop.resize((24, 24))
+                    pixels = get_image_pixels(resized_crop)
+                    predict = self._net24(Variable(pixels.unsqueeze(0)))
+                    predict = predict.data
+                    import pdb
+                    pdb.set_trace()
+                    label = predict.view(-1).max(0)[1].view(-1)[0]
+                    if label != 1:
+                        mistakes += 1
+                except:
+                    errors += 1
+                    continue
+        print("Mistakes: %d" % mistakes)
+        print("Errors: %d" % errors)

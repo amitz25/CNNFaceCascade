@@ -15,12 +15,12 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.001
-num_epochs = 10
+num_epochs = 2
 batch_size = 32
 iou_threshold = 0.5
-pyramid_downscale = 1.06
-pyramid_len = 50
-min_face_size = 40
+pyramid_downscale = 1.16
+pyramid_len = 15
+min_face_size = 30
 
 #TODO: Replace
 #work_dir = os.path.dirname(__file__)
@@ -68,22 +68,27 @@ def generate_pascal_dataset(image_dir, crop_size, num_samples, output_path):
 
     torch.save(samples, output_path)
 
-def mine_negative_dataset(face_detector, output_path, sample_size=3000):
-    regions_by_img = face_detector.detect_all_images(full_stack=False)
-
+def mine_negative_samples(img_dir, face_detector, output_path, sample_size=200000):
+    img_list = glob(os.path.join(img_dir, "*"))
     samples = []
-    for img_path in regions_by_img:
+
+    for img_path in img_list:
         if len(samples) >= sample_size:
             break
 
+        print('\rGenerating samples from background images... (%d\\%d)' % (len(samples), sample_size), end="")
         img = Image.open(img_path)
-        for region in regions_by_img[img_path]:
-            crop = img.crop((region.x, region.y, region.x + region.width, region.y + region.height))
+
+        res = face_detector.detect_image_12(img_path, debug=False)
+        for r in res:
+            import pdb
+            pdb.set_trace()
+            crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
             resized_crop = crop.resize((24, 24))
             # Convert to long to save space
             pixels = (get_image_pixels(resized_crop) * 255).long()
             samples.append(pixels)
-            print('\rGenerating images (%d)' % len(samples), end="")
+
     torch.save(samples, output_path)
 
 
@@ -164,7 +169,7 @@ class Net24(nn.Module):
 
 def train_net24_temp():
     net = Net24()
-    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine_all.t7')
+    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine.t7')
     random.shuffle(dataset)
     dataset = dataset[:int(0.1 * len(dataset))]
     train_size = int(len(dataset) * 0.9)
@@ -182,8 +187,6 @@ def train_net24_temp():
         print("Epoch %d" % epoch)
         losses = []
         for i_batch, batch in enumerate(train_loader):
-            import pdb
-            pdb.set_trace()
             x = Variable(batch['data'])
             y = Variable(batch['label'])
             optimizer.zero_grad()
@@ -409,9 +412,11 @@ class FaceDetector(object):
         image = Image.open(image_path)
 
         res = []
-        pyramid = ImagePyramid(image, pyramid_len, pyramid_downscale)
+        #pyramid = ImagePyramid(image, pyramid_len, pyramid_downscale)
+        pyramid = tuple(pyramid_gaussian(image, downscale=pyramid_downscale))
         scale_resize_factor = 1.0
-        for img in pyramid:
+        for i in range(pyramid_len):
+            img = Image.fromarray(np.uint8(pyramid[i] * 255))
             resized_img = img.resize((int(x * 12.0 / min_face_size) for x in img.size))
             if min(resized_img.size) < 12:
                 break

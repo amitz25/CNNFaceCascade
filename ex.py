@@ -15,7 +15,7 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.001
-num_epochs = 2
+num_epochs = 8
 batch_size = 32
 iou_threshold = 0.5
 pyramid_downscale = 1.16
@@ -48,7 +48,7 @@ def get_image_random_region(image_path, crop_size):
     return get_image_pixels(img)
 
 
-def show_tensor_as_image(pixels):
+def visualize_tensor(pixels):
     plt.imshow((pixels.permute(1, 2, 0) * 255).byte().numpy())
     plt.show()
 
@@ -68,7 +68,8 @@ def generate_pascal_dataset(image_dir, crop_size, num_samples, output_path):
 
     torch.save(samples, output_path)
 
-def mine_negative_samples(img_dir, face_detector, output_path, sample_size=200000):
+
+def mine_negative_samples(img_dir, annotations_dir, mini_detector, output_path, sample_size=200000):
     img_list = glob(os.path.join(img_dir, "*"))
     samples = []
 
@@ -76,13 +77,17 @@ def mine_negative_samples(img_dir, face_detector, output_path, sample_size=20000
         if len(samples) >= sample_size:
             break
 
+        basename = os.path.splitext(os.path.basename(img_path))[0]
+        annotation = open(os.path.join(annotations_dir, basename) + ".xml", 'r').read()
+        if 'person' in annotation.lower():
+            # Since we have enough pictures without persons at all, we just ignore the ones with persons
+            continue
+
         print('\rGenerating samples from background images... (%d\\%d)' % (len(samples), sample_size), end="")
         img = Image.open(img_path)
 
-        res = face_detector.detect_image_12(img_path, debug=False)
+        res = mini_detector.detect_image(img_path, debug=False)
         for r in res:
-            import pdb
-            pdb.set_trace()
             crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
             resized_crop = crop.resize((24, 24))
             # Convert to long to save space
@@ -128,6 +133,7 @@ class Net12(nn.Module):
         x = self.linear2(x)
         return self.softmax(x)
 
+
 class Net12FCN(nn.Module):
     def __init__(self):
         super(Net12FCN, self).__init__()
@@ -144,34 +150,30 @@ class Net12FCN(nn.Module):
         return self.softmax(x)
 
 
+# 3x24x24
+# 32x20x20
+# 32x9x9
 class Net24(nn.Module):
     def __init__(self):
         super(Net24, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=5, stride=1)
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=5, stride=1)
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
-        self.linear1 = nn.Linear(in_features=5184, out_features=128)
-        self.linear2 = nn.Linear(in_features=128, out_features=2)
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=9, stride=1)
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=2, kernel_size=1, stride=1)
         self.softmax = nn.LogSoftmax()
 
     def forward(self, x):
         x = F.relu(self.pool(self.conv1(x)))
-        x = x.view(x.size()[0], -1)
-        x = F.relu(self.linear1(x))
-        x = self.linear2(x)
+        x = F.relu(self.conv2(x))
+        x = self.conv3(x)
         return self.softmax(x)
 
-    def load_dataset(self, aflw_path, mine_path):
-        aflw_dataset = load_lua(aflw_path)
-        mine_dataset = torch.load(mine_path)
-        dataset = [(aflw_dataset[k], 1) for k in aflw_dataset]
-        dataset += [(k, 0) for k in mine_dataset]
-        return dataset
 
 def train_net24_temp():
     net = Net24()
     dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine.t7')
     random.shuffle(dataset)
-    dataset = dataset[:int(0.1 * len(dataset))]
+    #dataset = dataset[:int(0.1 * len(dataset))]
     train_size = int(len(dataset) * 0.9)
 
     train_dataset = FaceDataset(dataset[:train_size])
@@ -224,6 +226,8 @@ def train_net(net, positive_dataset_path, negative_dataset_path, output_path):
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
+    import pdb
+    pdb.set_trace()
     for epoch in range(num_epochs):
         print("Epoch %d" % epoch)
         losses = []
@@ -353,10 +357,9 @@ class ImagePyramid(object):
         return self._imgs[i]
 
 
-class FaceDetector(object):
-    def __init__(self, net12, net24, ground_truth_path, img_dir):
+class MiniFaceDetector(object):
+    def __init__(self, net12, ground_truth_path, img_dir):
         self._net12 = net12
-        self._net24 = net24
         self._ground_truth = self.read_ground_truth(ground_truth_path, img_dir)
 
     def get_ground_truth(self):
@@ -382,12 +385,12 @@ class FaceDetector(object):
             ax.add_patch(patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
         plt.show()
 
-    def calculate_recall(self, full_stack, debug=True):
+    def calculate_recall(self, debug=True):
         mistakes = 0
         num_truths = 0
         num_regions = 0
 
-        res = self.detect_all_images(full_stack)
+        res = self.detect_all_images()
 
         for k in res:
             truths = self._ground_truth[k]
@@ -408,7 +411,7 @@ class FaceDetector(object):
             return (num_truths - mistakes) / num_truths
 
 
-    def detect_image_12(self, image_path, debug=True):
+    def detect_image(self, image_path, debug=True):
         image = Image.open(image_path)
 
         res = []
@@ -446,17 +449,14 @@ class FaceDetector(object):
             plt.show()
         return res
 
-    def detect_all_images(self, full_stack):
+    def detect_all_images(self):
         res = {}
         num_images = 0
         num_errors = 0
         for k in self._ground_truth:
             try:
                 print('\rRunning detector on images... (%d)' % num_images, end="")
-                if full_stack:
-                    regions = self.detect_image(k, debug=False)
-                else:
-                    regions = self.detect_image_12(k, debug=False)
+                regions = self.detect_image(k, debug=False)
                 res[k] = regions
                 num_images += 1
             except:
@@ -468,10 +468,17 @@ class FaceDetector(object):
         print('Num of errors: %d' % num_errors)
         return res
 
+
+class FullFaceDetector(object):
+    def __init__(self, mini_detector, net24):
+        self._net = net24
+        self._mini_detector = mini_detector
+        self._ground_truth = self._mini_detector.get_ground_truth()
+
     def detect_image(self, image_path, debug=True):
         img = Image.open(image_path)
 
-        regions = self.detect_image_12(image_path, debug)
+        regions = self._mini_detector.detect_image(image_path, debug)
         pixel_regions = []
         for r in regions:
             crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
@@ -479,13 +486,13 @@ class FaceDetector(object):
             pixels = get_image_pixels(resized_crop)
             pixel_regions.append(pixels)
 
-        predict = self._net24(Variable(torch.stack(pixel_regions)))
+        predict = self._net(Variable(torch.stack(pixel_regions)))
         predict = predict.data
         labels = predict.max(1)[1]
         labels = labels.view(-1)
 
-        final_regions = [RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i][1]) for i in torch.nonzero(labels).view(-1)]
-        #final_regions = nms(final_regions)
+        final_regions = [RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i][1][0, 0]) for i in torch.nonzero(labels).view(-1)]
+        final_regions = nms(final_regions)
 
         if debug:
             fig, ax = plt.subplots(1)
@@ -497,8 +504,53 @@ class FaceDetector(object):
         else:
             return final_regions
 
+    def detect_all_images(self):
+        res = {}
+        num_images = 0
+        num_errors = 0
+        for k in self._ground_truth:
+            try:
+                print('\rRunning detector on images... (%d)' % num_images, end="")
+                regions = self.detect_image(k, debug=False)
+                res[k] = regions
+                num_images += 1
+            except:
+                # TODO: Ask if this is ok
+                num_errors += 1
+                continue
+
+        print('')
+        print('Num of errors: %d' % num_errors)
+        return res
+
+    def calculate_recall(self, debug=True):
+        mistakes = 0
+        num_truths = 0
+        num_regions = 0
+
+        res = self.detect_all_images()
+
+        for k in res:
+            truths = self._ground_truth[k]
+            num_regions += len(res[k])
+            for truth in truths:
+                num_truths += 1
+                agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
+                if len(agreeing_regions) == 0:
+                    mistakes += 1
+
+        if debug:
+            print("Mistakes: %d" % mistakes)
+            print("Num of truths: %d" % num_truths)
+            print("Num of images: %d" % len(self._ground_truth))
+            print("Num of region proposals: %d" % num_regions)
+            print("Recall: %f" % ((num_truths - mistakes) / num_truths))
+        else:
+            return (num_truths - mistakes) / num_truths
+
+
     #TODO: Delete
-    def calc_ground_truth_recall_24net(self):
+    def calc_ground_truth_recall(self):
         mistakes = 0
         errors = 0
         for k in self._ground_truth:
@@ -508,35 +560,11 @@ class FaceDetector(object):
                     crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
                     resized_crop = crop.resize((24, 24))
                     pixels = get_image_pixels(resized_crop)
-                    predict = self._net24(Variable(pixels.unsqueeze(0)))
+                    predict = self._net(Variable(pixels.unsqueeze(0)))
                     predict = predict.data
-                    if predict[0][0] > predict[0][1]:
+                    if predict[0][0][0,0] > predict[0][1][0,0]:
                         mistakes += 1
                 except:
                     errors += 1
-                    continue
         print("Mistakes: %d" % mistakes)
         print("Errors: %d" % errors)
-
-def test_temp():
-    net12 = torch.load(r'c:\Study\Courses\dl\ex2\net12')
-    net24 = torch.load(r'c:\Study\Courses\dl\ex2\net24')
-    f = FaceDetector(net12, net24, r'c:\Study\Courses\dl\ex2\EX2_data\fddb\FDDB-folds\FDDB-fold-01-ellipseList.txt',
-                     r'c:\Study\Courses\dl\ex2\EX2_data\fddb\images')
-
-    min_config = ()
-    min_recall = 1
-    for pyramid_downscale in [1.06, 1.07, 1.08, 1.09, 1.1, 1.11]:
-        for min_face_size in range(25, 35, 1):
-            recall = f.calculate_recall(full_stack=False, debug=False)
-            if recall < min_recall:
-                min_recall = recall
-                min_config = (pyramid_downscale, min_face_size)
-
-    print("BEST: %f %f %f" % (min_recall, min_config[0], min_config[1]))
-    mine_negative_dataset(f, r'c:\Study\Courses\dl\ex2\negative_mine.t7', 30000)
-    train_net24_temp()
-    net24 = torch.load(r'c:\Study\Courses\dl\ex2\net24')
-    f = FaceDetector(net12, net24, r'c:\Study\Courses\dl\ex2\EX2_data\fddb\FDDB-folds\FDDB-fold-01-ellipseList.txt',
-                     r'c:\Study\Courses\dl\ex2\EX2_data\fddb\images')
-    f.calculate_recall(full_stack=True)

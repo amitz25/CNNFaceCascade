@@ -15,7 +15,7 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.001
-num_epochs = 8
+num_epochs = 3
 batch_size = 32
 iou_threshold = 0.5
 pyramid_downscale = 1.16
@@ -69,6 +69,7 @@ def generate_pascal_dataset(image_dir, crop_size, num_samples, output_path):
     torch.save(samples, output_path)
 
 
+#TODO: Delete?
 def mine_negative_samples(img_dir, annotations_dir, mini_detector, output_path, sample_size=200000):
     img_list = glob(os.path.join(img_dir, "*"))
     samples = []
@@ -97,15 +98,6 @@ def mine_negative_samples(img_dir, annotations_dir, mini_detector, output_path, 
     torch.save(samples, output_path)
 
 
-def load_dataset(positive_path, negative_path):
-    positive_dataset = load_lua(positive_path)
-    negative_dataset = torch.load(negative_path)
-    negative_dataset = [x.float() / 255 for x in negative_dataset]
-    dataset = [(positive_dataset[k], 1) for k in positive_dataset]
-    dataset += [(k, 0) for k in negative_dataset]
-    return dataset
-
-
 class FaceDataset(Dataset):
     def __init__(self, dataset):
         self._dataset = dataset
@@ -123,15 +115,14 @@ class Net12(nn.Module):
         self.conv = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1)
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
         self.linear1 = nn.Linear(in_features=256, out_features=16)
-        self.linear2 = nn.Linear(in_features=16, out_features=2)
-        self.softmax = nn.LogSoftmax()
+        self.linear2 = nn.Linear(in_features=16, out_features=1)
 
     def forward(self, x):
         x = F.relu(self.pool(self.conv(x)))
         x = x.view(x.size()[0], -1)
         x = F.relu(self.linear1(x))
-        x = self.linear2(x)
-        return self.softmax(x)
+        return self.linear2(x)
+
 
 
 class Net12FCN(nn.Module):
@@ -140,80 +131,29 @@ class Net12FCN(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1)
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=4, stride=1)
-        self.conv3 = nn.Conv2d(in_channels=16, out_channels=2, kernel_size=1, stride=1)
-        self.softmax = nn.LogSoftmax()
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=1, kernel_size=1, stride=1)
 
     def forward(self, x):
         x = F.relu(self.pool(self.conv1(x)))
         x = F.relu(self.conv2(x))
-        x = self.conv3(x)
-        return self.softmax(x)
+        return self.conv3(x)
 
 
-# 3x24x24
-# 32x20x20
-# 32x9x9
 class Net24(nn.Module):
     def __init__(self):
         super(Net24, self).__init__()
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=5, stride=1)
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=9, stride=1)
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=2, kernel_size=1, stride=1)
-        self.softmax = nn.LogSoftmax()
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=1, kernel_size=1, stride=1)
 
     def forward(self, x):
         x = F.relu(self.pool(self.conv1(x)))
         x = F.relu(self.conv2(x))
-        x = self.conv3(x)
-        return self.softmax(x)
+        return self.conv3(x)
 
 
-def train_net24_temp():
-    net = Net24()
-    dataset = load_dataset(r'c:\Study\Courses\dl\ex2\EX2_data\aflw\aflw_24.t7', r'c:\Study\Courses\dl\ex2\negative_mine.t7')
-    random.shuffle(dataset)
-    #dataset = dataset[:int(0.1 * len(dataset))]
-    train_size = int(len(dataset) * 0.9)
-
-    train_dataset = FaceDataset(dataset[:train_size])
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    test_dataset = dataset[train_size:]
-    test_x = Variable(torch.stack([x[0] for x in test_dataset]))
-    test_y = Variable(torch.LongTensor([x[1] for x in test_dataset]))
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
-    for epoch in range(3):
-        print("Epoch %d" % epoch)
-        losses = []
-        for i_batch, batch in enumerate(train_loader):
-            x = Variable(batch['data'])
-            y = Variable(batch['label'])
-            optimizer.zero_grad()
-            output = net(x)
-            output = output.view(output.size()[0], output.size()[1])
-            loss = criterion(output, y)
-            losses.append(loss.data[0])
-            loss.backward()
-            optimizer.step()
-
-        test_predict = net(test_x)
-        test_predict = test_predict.view(test_predict.size()[0], test_predict.size()[1])
-        test_loss = criterion(test_predict, test_y)
-        avg_train_loss = float(sum(losses)) / len(losses)
-        print("Train loss %f, validation loss %f" % (avg_train_loss, test_loss.data[0]))
-
-    predict = net(test_x).max(1)[1]
-    mistakes = sum(predict != test_y)
-    mistakes = mistakes.data.view(1)[0]
-    print("Error rate: %f" % (float(mistakes / len(test_y))))
-
-    torch.save(net, r'c:\Study\Courses\dl\ex2\net24')
-
-def train_net(net, positive_dataset_path, negative_dataset_path, output_path):
-    dataset = load_dataset(positive_dataset_path, negative_dataset_path)
+def train_net(net, dataset, learn_rate, batch_size):
     random.shuffle(dataset)
     train_size = int(len(dataset) * 0.9)
 
@@ -222,37 +162,90 @@ def train_net(net, positive_dataset_path, negative_dataset_path, output_path):
 
     test_dataset = dataset[train_size:]
     test_x = Variable(torch.stack([x[0] for x in test_dataset]))
-    test_y = Variable(torch.LongTensor([x[1] for x in test_dataset]))
+    test_y = Variable(torch.FloatTensor([x[1] for x in test_dataset]) == 1)
 
-    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
-    import pdb
-    pdb.set_trace()
+    criterion = nn.SoftMarginLoss()
+
+    net.train()
     for epoch in range(num_epochs):
         print("Epoch %d" % epoch)
         losses = []
         for i_batch, batch in enumerate(train_loader):
-            x = Variable(batch['data'])
-            y = Variable(batch['label'])
+            x = Variable(batch['data'].float())
+            y = Variable(batch['label'].float())
             optimizer.zero_grad()
             output = net(x)
-            output = output.view(output.size()[0], output.size()[1])
+            output = output.view(output.size()[0], 1)
             loss = criterion(output, y)
             losses.append(loss.data[0])
             loss.backward()
             optimizer.step()
 
-        test_predict = net(test_x)
-        test_predict = test_predict.view(test_predict.size()[0], test_predict.size()[1])
-        test_loss = criterion(test_predict, test_y)
         avg_train_loss = float(sum(losses)) / len(losses)
-        print("Train loss %f, validation loss %f" % (avg_train_loss, test_loss.data[0]))
+        print("Train loss %f" % avg_train_loss)
 
-    predict = net(test_x).max(1)[1]
+    net.eval()
+    predict = net(test_x).view(-1) >= 0
     mistakes = sum(predict != test_y)
-    mistakes = mistakes.data.view(1)[0]
+    mistakes = mistakes.data[0]
     print("Error rate: %f" % (float(mistakes / len(test_y))))
 
+
+def load_background_dataset(background_dataset_path):
+    background_dataset = torch.load(background_dataset_path)
+    background_dataset = [x.float() / 255 for x in background_dataset]
+    return background_dataset
+
+
+def train_net12(net, positive_dataset_path, background_dataset_path, output_path):
+    positive_dataset = load_lua(positive_dataset_path)
+    background_dataset = load_background_dataset(background_dataset_path)
+
+    dataset = [(positive_dataset[k], 1) for k in positive_dataset]
+    dataset += [(k, -1) for k in background_dataset]
+
+    train_net(net, dataset, learn_rate, batch_size)
+    torch.save(net, output_path)
+
+
+def mine_negative_dataset(img_dir, annotations_dir, mini_detector, output_path, sample_size=200000):
+    img_list = glob(os.path.join(img_dir, "*"))
+    samples = []
+
+    for img_path in img_list:
+        if len(samples) >= sample_size:
+            break
+
+        basename = os.path.splitext(os.path.basename(img_path))[0]
+        annotation = open(os.path.join(annotations_dir, basename) + ".xml", 'r').read()
+        if 'person' in annotation.lower():
+            # Since we have enough pictures without persons at all, we just ignore the ones with persons
+            continue
+
+        print('\rGenerating samples from background images... (%d\\%d)' % (len(samples), sample_size), end="")
+        img = Image.open(img_path)
+
+        res = mini_detector.detect_image(img_path, debug=False)
+        for r in res:
+            crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
+            resized_crop = crop.resize((24, 24))
+            # Convert to long to save space
+            pixels = (get_image_pixels(resized_crop) * 255).long()
+            samples.append(pixels)
+
+    torch.save(samples, output_path)
+
+
+def train_net24(positive_dataset_path, mined_dataset_path, output_path):
+    positive_dataset = load_lua(positive_dataset_path)
+    mined_dataset = torch.load(mined_dataset_path)
+
+    dataset = [(positive_dataset[k], 1) for k in positive_dataset]
+    dataset += [(k.float() / 255, -1) for k in mined_dataset]
+
+    net = Net24()
+    train_net(net, dataset, learn_rate, batch_size)
     torch.save(net, output_path)
 
 
@@ -340,6 +333,7 @@ class EllipseFoldReader(object):
     def _translate_ellipse_path(self, ellipse_path, img_dir):
         return os.path.join(img_dir, ellipse_path.replace('/', os.sep)) + '.jpg'
 
+
 class ImagePyramid(object):
     def __init__(self, img, num_images, downscale):
         self._imgs = [img]
@@ -359,7 +353,7 @@ class ImagePyramid(object):
 
 class MiniFaceDetector(object):
     def __init__(self, net12, ground_truth_path, img_dir):
-        self._net12 = net12
+        self._net = net12
         self._ground_truth = self.read_ground_truth(ground_truth_path, img_dir)
 
     def get_ground_truth(self):
@@ -410,12 +404,10 @@ class MiniFaceDetector(object):
         else:
             return (num_truths - mistakes) / num_truths
 
-
     def detect_image(self, image_path, debug=True):
         image = Image.open(image_path)
 
         res = []
-        #pyramid = ImagePyramid(image, pyramid_len, pyramid_downscale)
         pyramid = tuple(pyramid_gaussian(image, downscale=pyramid_downscale))
         scale_resize_factor = 1.0
         for i in range(pyramid_len):
@@ -425,17 +417,17 @@ class MiniFaceDetector(object):
                 break
 
             pixels = get_image_pixels(resized_img)
-            predict = self._net12(Variable(pixels.unsqueeze(0)))
-            predict = predict[0].data
+            predict = self._net(Variable(pixels.unsqueeze(0)))
+            predict = predict.data[0, 0]
 
             regions = []
-            approved_idxs = torch.nonzero(predict.max(0)[1][0])
+            approved_idxs = torch.nonzero(predict >= 0)
             if len(approved_idxs):
                 for idxs in approved_idxs:
                     regions.append(RegionProposal(scale_resize_factor * 2 * idxs[1] * min_face_size / 12.0,
                                                   scale_resize_factor * 2 * idxs[0] * min_face_size / 12.0,
                                                   scale_resize_factor * min_face_size,
-                                                  predict[0][idxs[0]][idxs[1]]))
+                                                  predict[idxs[0]][idxs[1]]))
             regions = nms(regions)
             res += regions
             scale_resize_factor *= pyramid_downscale
@@ -487,22 +479,25 @@ class FullFaceDetector(object):
             pixel_regions.append(pixels)
 
         predict = self._net(Variable(torch.stack(pixel_regions)))
-        predict = predict.data
-        labels = predict.max(1)[1]
-        labels = labels.view(-1)
+        predict = predict.data.view(predict.size()[0])
+        approved_idxs = torch.nonzero(predict >= 0)
 
-        final_regions = [RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i][1][0, 0]) for i in torch.nonzero(labels).view(-1)]
-        final_regions = nms(final_regions)
+        accepted_regions = []
+        for idx in approved_idxs:
+            i = idx[0]
+            accepted_regions.append(RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[0]))
+
+        accepted_regions = nms(accepted_regions)
 
         if debug:
             fig, ax = plt.subplots(1)
             ax.imshow(img)
-            for r in final_regions:
+            for r in accepted_regions:
                 ax.add_patch(
                     patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
             plt.show()
         else:
-            return final_regions
+            return accepted_regions
 
     def detect_all_images(self):
         res = {}
@@ -561,8 +556,8 @@ class FullFaceDetector(object):
                     resized_crop = crop.resize((24, 24))
                     pixels = get_image_pixels(resized_crop)
                     predict = self._net(Variable(pixels.unsqueeze(0)))
-                    predict = predict.data
-                    if predict[0][0][0,0] > predict[0][1][0,0]:
+                    predict = predict.data.view(1)[0]
+                    if predict < 0:
                         mistakes += 1
                 except:
                     errors += 1

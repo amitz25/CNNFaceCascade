@@ -15,11 +15,11 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.001
-num_epochs = 4
-batch_size = 32
+num_epochs = 10
+batch_size = 16
 iou_threshold = 0.5
 pyramid_downscale = 1.16
-pyramid_len = 15
+pyramid_len = 100
 min_face_size = 30
 
 #TODO: Replace
@@ -36,6 +36,10 @@ def get_image_pixels(image):
     return pixels.float() / 255
 
 
+def pixels_to_image(pixels):
+    return Image.fromarray((pixels.permute(1, 2, 0) * 255).byte().numpy())
+
+
 def get_image_random_region(image_path, crop_size):
     img = Image.open(image_path)
     max_x = img.size[0] - crop_size - 1
@@ -49,7 +53,7 @@ def get_image_random_region(image_path, crop_size):
 
 
 def visualize_tensor(pixels):
-    plt.imshow((pixels.permute(1, 2, 0) * 255).byte().numpy())
+    plt.imshow(pixels_to_image(pixels))
     plt.show()
 
 
@@ -396,13 +400,11 @@ class MiniFaceDetector(object):
             return (num_truths - mistakes) / num_truths
 
     def detect_image(self, image_path, debug=True):
-        image = Image.open(image_path)
+        img = Image.open(image_path)
 
         res = []
-        pyramid = tuple(pyramid_gaussian(image, downscale=pyramid_downscale))
         scale_resize_factor = 1.0
         for i in range(pyramid_len):
-            img = Image.fromarray(np.uint8(pyramid[i] * 255))
             resized_img = img.resize((int(x * 12.0 / min_face_size) for x in img.size))
             if min(resized_img.size) < 12:
                 break
@@ -421,11 +423,13 @@ class MiniFaceDetector(object):
                                                   predict[idxs[0]][idxs[1]]))
             regions = nms(regions)
             res += regions
+
             scale_resize_factor *= pyramid_downscale
+            img = img.resize((int(x / pyramid_downscale) for x in img.size))
 
         if debug:
             fig, ax = plt.subplots(1)
-            ax.imshow(image)
+            ax.imshow(Image.open(image_path))
             for r in res:
                 ax.add_patch(
                     patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))

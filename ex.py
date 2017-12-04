@@ -14,13 +14,18 @@ from skimage.transform import pyramid_gaussian
 import matplotlib.patches as patches
 import os
 
-learn_rate = 0.001
-num_epochs = 10
-batch_size = 16
 iou_threshold = 0.5
 pyramid_downscale = 1.16
 pyramid_len = 100
 min_face_size = 30
+
+batch_size_12 = 16
+num_epochs_12 = 10
+learn_rate_12 = 0.001
+
+batch_size_24 = 16
+num_epochs_24 = 4
+learn_rate_24 = 0.001
 
 #TODO: Replace
 #work_dir = os.path.dirname(__file__)
@@ -157,7 +162,7 @@ class Net24(nn.Module):
         return self.conv3(x)
 
 
-def train_net(net, dataset, learn_rate, batch_size):
+def train_net(net, dataset, learn_rate, batch_size, num_epochs):
     random.shuffle(dataset)
     train_size = int(len(dataset) * 0.9)
 
@@ -213,7 +218,7 @@ def train_net12(net, positive_dataset_path, background_dataset_path, output_path
     dataset = [(positive_dataset[k], 1) for k in positive_dataset]
     dataset += [(k, -1) for k in background_dataset]
 
-    train_net(net, dataset, learn_rate, batch_size)
+    train_net(net, dataset, learn_rate_12, batch_size_12, num_epochs_12)
     torch.save(net, output_path)
 
 
@@ -240,7 +245,7 @@ def train_net24(positive_dataset_path, mined_dataset_path, output_path):
     dataset += [(k, -1) for k in mined_dataset]
 
     net = Net24()
-    train_net(net, dataset, learn_rate, batch_size)
+    train_net(net, dataset, learn_rate_24, batch_size_24, num_epochs_24)
     torch.save(net, output_path)
 
 

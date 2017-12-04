@@ -15,7 +15,7 @@ import matplotlib.patches as patches
 import os
 
 learn_rate = 0.001
-num_epochs = 3
+num_epochs = 4
 batch_size = 32
 iou_threshold = 0.5
 pyramid_downscale = 1.16
@@ -167,9 +167,9 @@ def train_net(net, dataset, learn_rate, batch_size):
     optimizer = torch.optim.Adam(net.parameters(), lr=learn_rate)
     criterion = nn.SoftMarginLoss()
 
-    net.train()
     for epoch in range(num_epochs):
         print("Epoch %d" % epoch)
+        net.train()
         losses = []
         for i_batch, batch in enumerate(train_loader):
             x = Variable(batch['data'].float())
@@ -183,7 +183,11 @@ def train_net(net, dataset, learn_rate, batch_size):
             optimizer.step()
 
         avg_train_loss = float(sum(losses)) / len(losses)
-        print("Train loss %f" % avg_train_loss)
+
+        net.eval()
+        output = net(test_x)
+        test_loss = criterion(output, test_y.float()).data[0]
+        print("Train loss %f, validation loss %f" % (avg_train_loss, test_loss))
 
     net.eval()
     predict = net(test_x).view(-1) >= 0
@@ -209,32 +213,19 @@ def train_net12(net, positive_dataset_path, background_dataset_path, output_path
     torch.save(net, output_path)
 
 
-def mine_negative_dataset(img_dir, annotations_dir, mini_detector, output_path, sample_size=200000):
-    img_list = glob(os.path.join(img_dir, "*"))
-    samples = []
+def mine_negative_dataset(net12, background_dataset_path, output_path):
+    background_dataset = load_background_dataset(background_dataset_path)
+    predict = net12(Variable(torch.stack(background_dataset)))
+    predict = predict.data.view(predict.size()[0])
+    approved_idxs = torch.nonzero(predict >= 0)
 
-    for img_path in img_list:
-        if len(samples) >= sample_size:
-            break
+    res = []
+    for idx in approved_idxs:
+        img = Image.fromarray((background_dataset[idx[0]] * 255).permute(1, 2, 0).byte().numpy())
+        img = img.resize((24, 24))
+        res.append(get_image_pixels(img))
 
-        basename = os.path.splitext(os.path.basename(img_path))[0]
-        annotation = open(os.path.join(annotations_dir, basename) + ".xml", 'r').read()
-        if 'person' in annotation.lower():
-            # Since we have enough pictures without persons at all, we just ignore the ones with persons
-            continue
-
-        print('\rGenerating samples from background images... (%d\\%d)' % (len(samples), sample_size), end="")
-        img = Image.open(img_path)
-
-        res = mini_detector.detect_image(img_path, debug=False)
-        for r in res:
-            crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
-            resized_crop = crop.resize((24, 24))
-            # Convert to long to save space
-            pixels = (get_image_pixels(resized_crop) * 255).long()
-            samples.append(pixels)
-
-    torch.save(samples, output_path)
+    torch.save(res, output_path)
 
 
 def train_net24(positive_dataset_path, mined_dataset_path, output_path):
@@ -242,7 +233,7 @@ def train_net24(positive_dataset_path, mined_dataset_path, output_path):
     mined_dataset = torch.load(mined_dataset_path)
 
     dataset = [(positive_dataset[k], 1) for k in positive_dataset]
-    dataset += [(k.float() / 255, -1) for k in mined_dataset]
+    dataset += [(k, -1) for k in mined_dataset]
 
     net = Net24()
     train_net(net, dataset, learn_rate, batch_size)

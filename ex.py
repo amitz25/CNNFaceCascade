@@ -15,9 +15,8 @@ import matplotlib.patches as patches
 import os
 
 iou_threshold = 0.5
-pyramid_downscale = 1.16
-pyramid_len = 100
-min_face_size = 30
+pyramid_downscale = 1.13
+min_face_size = 25
 
 batch_size_12 = 16
 num_epochs_12 = 10
@@ -409,7 +408,7 @@ class MiniFaceDetector(object):
 
         res = []
         scale_resize_factor = 1.0
-        for i in range(pyramid_len):
+        while True:
             resized_img = img.resize((int(x * 12.0 / min_face_size) for x in img.size))
             if min(resized_img.size) < 12:
                 break
@@ -485,7 +484,7 @@ class FullFaceDetector(object):
         accepted_regions = []
         for idx in approved_idxs:
             i = idx[0]
-            accepted_regions.append(RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[0]))
+            accepted_regions.append(RegionProposal(regions[i].x, regions[i].y, regions[i].width, predict[i]))
 
         accepted_regions = nms(accepted_regions)
 

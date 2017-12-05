@@ -22,19 +22,24 @@ batch_size_12 = 16
 num_epochs_12 = 10
 learn_rate_12 = 0.001
 
-batch_size_24 = 16
+batch_size_24 = 32
 num_epochs_24 = 4
-learn_rate_24 = 0.001
+learn_rate_24 = 0.0005
 
 #TODO: Replace
 #work_dir = os.path.dirname(__file__)
 work_dir = r'c:\Study\Courses\dl\ex2'
 
+
 def get_image_pixels(image):
     pixels = torch.from_numpy(np.asarray(image))
 
-    # Reorder from H W C to C W H
-    pixels = pixels.permute(2, 0, 1)
+    # Handle greyscale
+    if len(pixels.size()) == 2:
+        pixels = torch.stack([pixels] * 3)
+    else:
+        # Reorder from H W C to C W H
+        pixels = pixels.permute(2, 0, 1)
 
     # Convert to float to maintain consistency
     return pixels.float() / 255
@@ -130,7 +135,6 @@ class Net12(nn.Module):
         x = x.view(x.size()[0], -1)
         x = F.relu(self.linear1(x))
         return self.linear2(x)
-
 
 
 class Net12FCN(nn.Module):
@@ -382,15 +386,18 @@ class MiniFaceDetector(object):
         mistakes = 0
         num_truths = 0
         num_regions = 0
+        num_images = 0
 
-        res = self.detect_all_images()
+        for k in self._ground_truth:
+            print('\rRunning detector on images... (%d)' % num_images, end="")
+            regions = self.detect_image(k, debug=False)
+            num_images += 1
 
-        for k in res:
             truths = self._ground_truth[k]
-            num_regions += len(res[k])
+            num_regions += len(regions)
             for truth in truths:
                 num_truths += 1
-                agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
+                agreeing_regions = [r for r in regions if truth.iou(r) >= iou_threshold]
                 if len(agreeing_regions) == 0:
                     mistakes += 1
 
@@ -402,6 +409,29 @@ class MiniFaceDetector(object):
             print("Recall: %f" % ((num_truths - mistakes) / num_truths))
         else:
             return (num_truths - mistakes) / num_truths
+
+    def run(self, img_dir, fold_path, output_path):
+        img_paths = open(fold_path, 'r').read().splitlines()
+        text_lines = []
+        num_images = 0
+
+        for path in img_paths:
+            print('\rRunning detector on images... (%d)' % num_images, end="")
+            text_lines.append(path)
+            full_path = os.path.join(img_dir, os.path.join(img_dir, path.replace('/', os.sep)) + '.jpg')
+            res = self.detect_image(full_path, debug=False)
+            text_lines.append(str(len(res)))
+            for rect in res:
+                major_radius = rect.height / 2.0
+                minor_radius = rect.width / 2.0
+                angle = 0
+                center_x = rect.x + minor_radius
+                center_y = rect.y + major_radius
+                detection_score = rect.confidence
+                text_lines.append("%f %f %f %f %f  %f" % (major_radius, minor_radius, angle, center_x, center_y, detection_score))
+            num_images += 1
+
+        open(output_path, "w", newline='\n').write('\n'.join(text_lines))
 
     def detect_image(self, image_path, debug=True):
         img = Image.open(image_path)
@@ -438,25 +468,6 @@ class MiniFaceDetector(object):
                 ax.add_patch(
                     patches.Rectangle((r.x, r.y), r.width, r.height, linewidth=1, edgecolor='r', facecolor='none'))
             plt.show()
-        return res
-
-    def detect_all_images(self):
-        res = {}
-        num_images = 0
-        num_errors = 0
-        for k in self._ground_truth:
-            try:
-                print('\rRunning detector on images... (%d)' % num_images, end="")
-                regions = self.detect_image(k, debug=False)
-                res[k] = regions
-                num_images += 1
-            except:
-                # TODO: Ask if this is ok
-                num_errors += 1
-                continue
-
-        print('')
-        print('Num of errors: %d' % num_errors)
         return res
 
 
@@ -498,38 +509,22 @@ class FullFaceDetector(object):
         else:
             return accepted_regions
 
-    def detect_all_images(self):
-        res = {}
-        num_images = 0
-        num_errors = 0
-        for k in self._ground_truth:
-            try:
-                print('\rRunning detector on images... (%d)' % num_images, end="")
-                regions = self.detect_image(k, debug=False)
-                res[k] = regions
-                num_images += 1
-            except:
-                # TODO: Ask if this is ok
-                num_errors += 1
-                continue
-
-        print('')
-        print('Num of errors: %d' % num_errors)
-        return res
-
     def calculate_recall(self, debug=True):
         mistakes = 0
         num_truths = 0
         num_regions = 0
+        num_images = 0
 
-        res = self.detect_all_images()
+        for k in self._ground_truth:
+            print('\rRunning detector on images... (%d)' % num_images, end="")
+            regions = self.detect_image(k, debug=False)
+            num_images += 1
 
-        for k in res:
             truths = self._ground_truth[k]
-            num_regions += len(res[k])
+            num_regions += len(regions)
             for truth in truths:
                 num_truths += 1
-                agreeing_regions = [r for r in res[k] if truth.iou(r) >= iou_threshold]
+                agreeing_regions = [r for r in regions if truth.iou(r) >= iou_threshold]
                 if len(agreeing_regions) == 0:
                     mistakes += 1
 
@@ -542,23 +537,25 @@ class FullFaceDetector(object):
         else:
             return (num_truths - mistakes) / num_truths
 
+    def run(self, img_dir, fold_path, output_path):
+        img_paths = open(fold_path, 'r').read().splitlines()
+        text_lines = []
+        num_images = 0
 
-    #TODO: Delete
-    def calc_ground_truth_recall(self):
-        mistakes = 0
-        errors = 0
-        for k in self._ground_truth:
-            for r in self._ground_truth[k]:
-                try:
-                    img = Image.open(k)
-                    crop = img.crop((r.x, r.y, r.x + r.width, r.y + r.height))
-                    resized_crop = crop.resize((24, 24))
-                    pixels = get_image_pixels(resized_crop)
-                    predict = self._net(Variable(pixels.unsqueeze(0)))
-                    predict = predict.data.view(1)[0]
-                    if predict < 0:
-                        mistakes += 1
-                except:
-                    errors += 1
-        print("Mistakes: %d" % mistakes)
-        print("Errors: %d" % errors)
+        for path in img_paths:
+            print('\rRunning detector on images... (%d)' % num_images, end="")
+            text_lines.append(path)
+            full_path = os.path.join(img_dir, os.path.join(img_dir, path.replace('/', os.sep)) + '.jpg')
+            res = self.detect_image(full_path, debug=False)
+            text_lines.append(str(len(res)))
+            for rect in res:
+                major_radius = rect.height / 2.0
+                minor_radius = rect.width / 2.0
+                angle = 0
+                center_x = rect.x + minor_radius
+                center_y = rect.y + major_radius
+                detection_score = rect.confidence
+                text_lines.append("%f %f %f %f %f  %f" % (major_radius, minor_radius, angle, center_x, center_y, detection_score))
+            num_images += 1
+
+        open(output_path, "w", newline='\n').write('\n'.join(text_lines))
